@@ -1,0 +1,11 @@
+Test Category,Metric,Unit,Target Value,Measured Value (Device A),Measured Value (Device B),Pass/Fail,Notes
+Performance,Round-Trip Latency,ms,< 20 ms,,,,Low-latency mode
+Performance,CPU Usage (Engine ON),%,< 5%,,,,Use Profiler
+Performance,Memory Usage,MB,< 50 MB,,,,Java + Native Heap
+Performance,Battery Drain,mAh/min,Baseline + 10%,,,,Compare to idle
+Validation,Speech Detection Accuracy,%,> 90%,,,,Clean speech samples
+Validation,Music Detection Accuracy,%,> 90%,,,,Various genres
+Validation,Mixed Content Handling,-,Stable,,,,No rapid flickering
+Validation,Crossfade Smoothness,-,No Audible Artifacts,,,,Subjective test
+Validation,Conservative Mode Stability,-,No Glitches,,,,Test on budget device/BT
+Validation,Auto-Switch Response Time,ms,< 1000 ms,,,,Time to detect & switch
