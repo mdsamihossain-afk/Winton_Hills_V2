@@ -54,3 +54,11 @@ CTestTestfile.cmake
 # Misc
 .DS_Store
 .thumbs.db
+
+# Local emulator dump artifacts
+Medium-Phone-API-36.1-Android-16_*
+
+# Python cache artifacts
+tools/__pycache__/
+*.pyc
+
