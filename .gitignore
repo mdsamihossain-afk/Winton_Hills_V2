@@ -1,0 +1,56 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Android Studio
+*.iws
+*.ids
+*.ipr
+*.iml
+*.class
+
+# Android
+/local.properties
+/captures
+
+# Gradle
+.gradle/
+build/
+
+# NDK
+obj/
+libs/
+jniLibs/
+
+# IntelliJ
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+
+# Kotlin
+.kotlin/
+
+# Misc
+.DS_Store
+.thumbs.db

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "AutoEq",
+  "generated_at": "2026-03-14T00:00:00+00:00",
+  "profiles": [
+    {
+      "id": "sony_wh_1000xm4",
+      "manufacturer": "Sony",
+      "name": "WH-1000XM4",
+      "normalized_name": "sony wh 1000xm4",
+      "source": "AutoEq",
+      "form": "over-ear",
+      "preamp_db": -5.2,
+      "peq_filters": [
+        {
+          "type": "PEAK",
+          "fc_hz": 105.0,
+          "q": 1.41,
+          "gain_db": -3.2
+        }
+      ],
+      "tags": [
+        "headphone",
+        "bluetooth"
+      ],
+      "aliases": []
+    }
+  ]
+}
+

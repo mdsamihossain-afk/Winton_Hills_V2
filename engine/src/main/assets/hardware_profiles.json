@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "samsung_galaxy_s_speaker",
+      "match": { "manufacturer": "samsung", "modelPattern": "SM-S9|SM-S8|SM-G9" },
+      "route": "SPEAKER",
+      "latencyClass": "LOW",
+      "bufferFrames": 192,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "samsung_galaxy_a_speaker",
+      "match": { "manufacturer": "samsung", "modelPattern": "SM-A" },
+      "route": "SPEAKER",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 384,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "google_pixel_speaker",
+      "match": { "manufacturer": "google", "modelPattern": "Pixel" },
+      "route": "SPEAKER",
+      "latencyClass": "LOW",
+      "bufferFrames": 192,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "oneplus_speaker",
+      "match": { "manufacturer": "oneplus" },
+      "route": "SPEAKER",
+      "latencyClass": "LOW",
+      "bufferFrames": 256,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "xiaomi_speaker",
+      "match": { "manufacturer": "xiaomi" },
+      "route": "SPEAKER",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 384,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "huawei_speaker",
+      "match": { "manufacturer": "huawei" },
+      "route": "SPEAKER",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 512,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "oppo_speaker",
+      "match": { "manufacturer": "oppo" },
+      "route": "SPEAKER",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 384,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "motorola_speaker",
+      "match": { "manufacturer": "motorola" },
+      "route": "SPEAKER",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 512,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "generic_wired",
+      "match": {},
+      "route": "WIRED",
+      "latencyClass": "LOW",
+      "bufferFrames": 256,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "generic_usb",
+      "match": {},
+      "route": "USB",
+      "latencyClass": "NORMAL",
+      "bufferFrames": 512,
+      "sampleRate": 48000,
+      "forceConservative": false
+    },
+    {
+      "id": "generic_bluetooth",
+      "match": {},
+      "route": "BLUETOOTH",
+      "latencyClass": "HIGH",
+      "bufferFrames": 1024,
+      "sampleRate": 48000,
+      "forceConservative": true
+    },
+    {
+      "id": "fallback_unknown",
+      "match": {},
+      "route": "UNKNOWN",
+      "latencyClass": "HIGH",
+      "bufferFrames": 1024,
+      "sampleRate": 48000,
+      "forceConservative": true,
+      "isFallback": true
+    }
+  ]
+}
+
