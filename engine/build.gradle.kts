@@ -17,11 +17,16 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += ""
+                arguments("-DANDROID_STL=c++_shared")
             }
         }
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
         }
+    }
+
+    buildFeatures {
+        prefab = true
     }
 
     externalNativeBuild {
@@ -64,6 +69,7 @@ afterEvaluate {
 }
 
 dependencies {
+    api(libs.oboe)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

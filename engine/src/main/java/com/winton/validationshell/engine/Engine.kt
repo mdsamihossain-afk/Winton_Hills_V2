@@ -1,8 +1,14 @@
 package com.winton.validationshell.engine
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.AudioRouting
 import android.media.AudioDeviceInfo
+import android.media.projection.MediaProjection
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.winton.validationshell.engine.autoeq.AutoEqMatch
@@ -18,6 +24,14 @@ import com.winton.validationshell.engine.hardware.ProfileDatabase
 import com.winton.validationshell.engine.latency.LatencyTracker
 import com.winton.validationshell.engine.policy.PolicyConfig
 import com.winton.validationshell.engine.policy.PolicySelector
+
+/**
+ * Capture source selection for the engine.
+ */
+enum class CaptureSource {
+    MICROPHONE,
+    MEDIA_PROJECTION
+}
 
 /**
  * Public API surface for the Winton Audio Engine.
@@ -56,7 +70,7 @@ class Engine {
     private val policySelector = PolicySelector()
     private val latencyTracker = LatencyTracker()
     private var currentHardwareProfile: HardwareProfile = HardwareProfile.DEFAULT
-    private var captureThread: AudioCaptureThread? = null
+    @Volatile private var captureThread: AudioCaptureThread? = null
 
     // --- State ---
     private var isRunning = false
@@ -65,6 +79,19 @@ class Engine {
     private var bypassModeEnabled: Boolean = false
     private var lastAutoEqMatch: AutoEqMatch? = null
     private var matchedAutoEqBands = emptyList<com.winton.validationshell.engine.policy.BiquadBandConfig>()
+    @Volatile private var currentGain = 1.0f
+    @Volatile private var currentCaptureSource = CaptureSource.MEDIA_PROJECTION
+    private var mediaProjection: MediaProjection? = null
+
+    private val routingCallback = object : AudioRouting.OnRoutingChangedListener {
+        override fun onRoutingChanged(router: AudioRouting?) {
+            Log.d(TAG, "Audio routing changed. Signalling native engine.")
+            if (useNativePath() && isRunning) {
+                // Signal pause/reconfigure before stream teardown
+                nativePauseForRoutingChange()
+            }
+        }
+    }
 
     private fun useNativePath(): Boolean = nativeAvailable && nativeProcessingEnabled
 
@@ -108,6 +135,57 @@ class Engine {
     }
 
     /**
+     * Set the MediaProjection instance to be used for MEDIA_PROJECTION capture.
+     * Must be called before starting the engine with MEDIA_PROJECTION source.
+     */
+    fun setMediaProjection(projection: MediaProjection?) {
+        if (this.mediaProjection == projection) return
+        this.mediaProjection = projection
+        
+        // If we are currently running in MEDIA_PROJECTION mode, we need to restart
+        // the thread to use the new projection object immediately.
+        if (isRunning && currentCaptureSource == CaptureSource.MEDIA_PROJECTION) {
+            Log.i(TAG, "MediaProjection updated while running; restarting engine")
+            stopAudioEngine()
+            startAudioEngine(currentHardwareProfile.forceConservative)
+        }
+    }
+
+    /**
+     * Update the capture source. If the engine is running, it will be restarted.
+     */
+    fun setCaptureSource(source: CaptureSource) {
+        // Only skip restart if switching to Microphone and we are already on it.
+        // For MediaProjection, we always allow a "refresh" restart to handle token updates.
+        if (currentCaptureSource == source && source == CaptureSource.MICROPHONE) return
+        
+        Log.i(TAG, "Changing capture source to $source")
+
+        // If switching AWAY from MediaProjection, stop the token to clear the system indicator.
+        if (currentCaptureSource == CaptureSource.MEDIA_PROJECTION && source == CaptureSource.MICROPHONE) {
+            try {
+                mediaProjection?.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to stop mediaProjection during source switch", e)
+            }
+            mediaProjection = null
+        }
+
+        val wasRunning = isRunning
+        if (wasRunning) {
+            stopAudioEngine()
+        }
+        
+        currentCaptureSource = source
+        
+        if (wasRunning) {
+            startAudioEngine(currentHardwareProfile.forceConservative)
+        }
+    }
+
+    fun getCaptureSource(): CaptureSource = currentCaptureSource
+
+    /**
      * Start the audio engine.
      * @param conservativeMode use larger buffers and passthrough-only processing
      * @return true if started successfully
@@ -128,15 +206,25 @@ class Engine {
         }
 
         if (useNativePath()) {
-            return nativeStartEngine(conservativeMode)
+            return nativeStartEngine(
+                conservativeMode,
+                currentHardwareProfile.suggestedSampleRate,
+                currentHardwareProfile.suggestedBufferFrames
+            )
         }
 
         // Start real microphone capture for analysis
         stopCaptureThread() // safety: ensure no leftover thread
         val sampleRate = currentHardwareProfile.suggestedSampleRate
         val frameSize = if (conservativeMode) 2048 else 1024
-        captureThread = AudioCaptureThread(sampleRate, frameSize).also {
+        captureThread = AudioCaptureThread(
+            sampleRate = sampleRate,
+            frameSize = frameSize,
+            captureSource = currentCaptureSource,
+            mediaProjection = mediaProjection
+        ).also {
             it.bypassMode = bypassModeEnabled
+            it.outputGain = currentGain
 
             val startupBands = if (matchedAutoEqBands.isNotEmpty() && !bypassModeEnabled) {
                 matchedAutoEqBands
@@ -237,7 +325,12 @@ class Engine {
                 hardwareProfile = currentHardwareProfile,
                 currentTimeMs = SystemClock.elapsedRealtime()
             )
-            activePolicyId = selected.id
+            
+            if (selected.id != activePolicyId) {
+                activePolicyId = selected.id
+                updateEngineFilterChain()
+                Log.d(TAG, "Auto-mode switched to policy: ${selected.id}")
+            }
         }
 
         // Latency tracking
@@ -278,20 +371,10 @@ class Engine {
         // Manual policy change supersedes an AutoEq-applied chain.
         matchedAutoEqBands = emptyList()
 
-        val config = PolicyConfig.fromId(policyId)
-        val chainBands = if (!config.isPassthrough && !bypassModeEnabled) {
-            config.bands
-        } else {
-            emptyList()
-        }
-        val sampleRate = currentHardwareProfile.suggestedSampleRate
-        captureThread?.filterChain = if (chainBands.isNotEmpty()) {
-            BiquadFilterChain(chainBands, sampleRate).also { it.reset() }
-        } else {
-            null
-        }
+        updateEngineFilterChain()
 
         if (useNativePath()) {
+            val config = PolicyConfig.fromId(policyId)
             val mappedAutoEq = if (!config.isPassthrough) matchedAutoEqBands else emptyList()
             val payload = if (mappedAutoEq.isNotEmpty()) {
                 bandsToFloatArray(mappedAutoEq)
@@ -315,32 +398,23 @@ class Engine {
     }
 
     /**
+     * Set the output gain (0.0 to 1.0) for the capture thread's AudioTrack.
+     * Used for ducking during audio focus changes without stopping the engine.
+     */
+    fun setGain(gain: Float) {
+        currentGain = gain.coerceIn(0f, 1f)
+        captureThread?.outputGain = currentGain
+        Log.d(TAG, "Engine gain set to $currentGain")
+    }
+
+    /**
      * Set A/B output mode for Kotlin runtime DSP path.
      * true = bypass, false = processed.
      */
     fun setBypassMode(bypass: Boolean) {
         bypassModeEnabled = bypass
         captureThread?.bypassMode = bypass
-
-        if (bypass) {
-            captureThread?.filterChain = null
-            return
-        }
-
-        val sampleRate = currentHardwareProfile.suggestedSampleRate
-        val config = PolicyConfig.fromId(activePolicyId)
-        val bands = if (matchedAutoEqBands.isNotEmpty()) {
-            matchedAutoEqBands
-        } else if (!config.isPassthrough) {
-            config.bands
-        } else {
-            emptyList()
-        }
-        captureThread?.filterChain = if (bands.isNotEmpty()) {
-            BiquadFilterChain(bands, sampleRate).also { it.reset() }
-        } else {
-            null
-        }
+        updateEngineFilterChain()
     }
 
     /**
@@ -378,14 +452,36 @@ class Engine {
     }
 
     /**
-     * Quick health check. Returns a status string.
+     * Enhanced health check. Returns a detailed status string.
+     * Binder-aware: validates system service responsiveness to detect environment instability.
      */
-    fun healthCheck(): String {
-        return when {
+    fun healthCheck(context: Context? = null): String {
+        val captureError = captureThread?.lastError
+        val engineStatus = when {
+            captureError != null -> "Engine Error: $captureError"
             useNativePath() -> "Native Engine Ready"
             nativeAvailable -> "Native Engine Loaded (Kotlin Runtime Active)"
             else -> "Engine Stub Ready"
         }
+
+        // System-level health check if context is provided
+        val systemStatus = context?.let {
+            try {
+                val am = it.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                if (am != null) {
+                    // Simple non-blocking call to verify binder health
+                    val mode = am.mode
+                    "System Audio OK (Mode: $mode)"
+                } else {
+                    "System Audio Service Unavailable"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Health check binder failure", e)
+                "System Binder DEAD: ${e.message}"
+            }
+        } ?: "System State Unknown"
+
+        return "$engineStatus | $systemStatus"
     }
 
     /**
@@ -432,10 +528,7 @@ class Engine {
     fun applyMatchedProfile(): Boolean {
         if (matchedAutoEqBands.isEmpty()) return false
 
-        if (!bypassModeEnabled) {
-            val sampleRate = currentHardwareProfile.suggestedSampleRate
-            captureThread?.filterChain = BiquadFilterChain(matchedAutoEqBands, sampleRate).also { it.reset() }
-        }
+        updateEngineFilterChain()
 
         if (useNativePath()) {
             nativeSetPolicy(activePolicyId, bandsToFloatArray(matchedAutoEqBands))
@@ -447,15 +540,7 @@ class Engine {
     fun clearMatchedProfile() {
         lastAutoEqMatch = null
         matchedAutoEqBands = emptyList()
-
-        val config = PolicyConfig.fromId(activePolicyId)
-        val sampleRate = currentHardwareProfile.suggestedSampleRate
-        val bands = if (!config.isPassthrough && !bypassModeEnabled) config.bands else emptyList()
-        captureThread?.filterChain = if (bands.isNotEmpty()) {
-            BiquadFilterChain(bands, sampleRate).also { it.reset() }
-        } else {
-            null
-        }
+        updateEngineFilterChain()
     }
 
     /** Returns conservative AutoEq profile suggestions for UI typeahead. */
@@ -491,8 +576,13 @@ class Engine {
     // TODO(phase2-native): add a guarded native DSP insertion point without breaking Kotlin path.
     // ========================================================================
 
-    private external fun nativeStartEngine(conservative: Boolean): Boolean
+    private external fun nativeStartEngine(
+        conservative: Boolean,
+        sampleRate: Int,
+        bufferSize: Int
+    ): Boolean
     private external fun nativeStopEngine()
+    private external fun nativePauseForRoutingChange()
     private external fun nativeGetAnalysisData(): FloatArray
     private external fun nativeSetPolicy(policyId: Int, bands: FloatArray)
     private external fun nativeGetLatencyMs(): Float
@@ -528,5 +618,31 @@ class Engine {
             Log.d(TAG, "AudioCaptureThread stopped")
         }
         captureThread = null
+    }
+
+    /**
+     * Updates the active filter chain on the capture thread with ramping.
+     * Centralizes band selection logic (AutoEq > Policy > Empty).
+     */
+    private fun updateEngineFilterChain() {
+        val thread = captureThread ?: return
+        val sampleRate = currentHardwareProfile.suggestedSampleRate
+        val config = PolicyConfig.fromId(activePolicyId)
+        
+        val targetBands = when {
+            bypassModeEnabled -> emptyList()
+            matchedAutoEqBands.isNotEmpty() -> matchedAutoEqBands
+            !config.isPassthrough -> config.bands
+            else -> emptyList()
+        }
+
+        val currentChain = thread.filterChain
+        if (currentChain == null) {
+            if (targetBands.isNotEmpty()) {
+                thread.filterChain = BiquadFilterChain(targetBands, sampleRate).also { it.reset() }
+            }
+        } else {
+            currentChain.updateBands(targetBands, rampDurationMs = 50)
+        }
     }
 }

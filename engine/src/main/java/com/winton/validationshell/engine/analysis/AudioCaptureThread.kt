@@ -4,10 +4,15 @@ import android.annotation.SuppressLint
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.projection.MediaProjection
+import android.os.Build
 import android.util.Log
+import com.winton.validationshell.engine.CaptureSource
+import com.winton.validationshell.engine.Engine
 
 /**
  * Background thread that captures audio from the microphone via [AudioRecord],
@@ -24,8 +29,16 @@ import android.util.Log
  */
 class AudioCaptureThread(
     private val sampleRate: Int = 44100,
-    private val frameSize: Int = 1024 // samples per analysis frame (must be power of 2)
+    private val frameSize: Int = 1024, // samples per analysis frame (must be power of 2)
+    private val captureSource: CaptureSource = CaptureSource.MICROPHONE,
+    private val mediaProjection: MediaProjection? = null
 ) : Thread("AudioCaptureThread") {
+
+    init {
+        require(frameSize > 0 && (frameSize and (frameSize - 1)) == 0) {
+            "frameSize must be a power of 2 (got $frameSize)"
+        }
+    }
 
     companion object {
         private const val TAG = "AudioCaptureThread"
@@ -40,14 +53,108 @@ class AudioCaptureThread(
         val captureLatencyMs: Float = -1f
     )
 
-    @Volatile
-    var latestResult: AnalysisResult = AnalysisResult()
-        private set
+    private class MutableAnalysisResult {
+        var rms: Float = 0f
+        var spectralCentroid: Float = 0f
+        var classification: Int = 0
+        var confidence: Float = 0f
+        var captureLatencyMs: Float = -1f
+    }
+
+    private val resultLock = Any()
+    private val internalResult = MutableAnalysisResult()
+
+    /**
+     * Returns a snapshot of the latest analysis results.
+     * Thread-safe; avoids allocations in the high-frequency capture loop.
+     */
+    val latestResult: AnalysisResult
+        get() = synchronized(resultLock) {
+            AnalysisResult(
+                internalResult.rms,
+                internalResult.spectralCentroid,
+                internalResult.classification,
+                internalResult.confidence,
+                internalResult.captureLatencyMs
+            )
+        }
 
     @Volatile
     private var running = false
 
+    @Volatile
+    var lastError: String? = null
+        private set
+
     private var recorder: AudioRecord? = null
+
+    @SuppressLint("MissingPermission")
+    private fun buildAudioRecord(
+        activeSampleRate: Int,
+        channelConfig: Int,
+        audioFormat: Int,
+        bufferSize: Int
+    ): AudioRecord? {
+        // Emulator fallback: MEDIA_PROJECTION often fails or hangs on emulators
+        val effectiveSource = if (captureSource == CaptureSource.MEDIA_PROJECTION && isEmulator()) {
+            Log.w(TAG, "Emulator detected; falling back from MEDIA_PROJECTION to MICROPHONE")
+            CaptureSource.MICROPHONE
+        } else {
+            captureSource
+        }
+
+        return try {
+            val rec = if (effectiveSource == CaptureSource.MEDIA_PROJECTION &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mediaProjection != null
+            ) {
+                val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                    .addMatchingUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(android.media.AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(android.media.AudioAttributes.USAGE_UNKNOWN)
+                    .build()
+                AudioRecord.Builder()
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(audioFormat)
+                            .setSampleRate(activeSampleRate)
+                            .setChannelMask(channelConfig)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize)
+                    .setAudioPlaybackCaptureConfig(config)
+                    .build()
+            } else {
+                val source = if (effectiveSource == CaptureSource.MEDIA_PROJECTION) {
+                    // Fallback for API < 29 or missing projection
+                    MediaRecorder.AudioSource.REMOTE_SUBMIX
+                } else {
+                    MediaRecorder.AudioSource.MIC
+                }
+                AudioRecord(
+                    source,
+                    activeSampleRate,
+                    channelConfig,
+                    audioFormat,
+                    bufferSize
+                )
+            }
+
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord not initialised (state=${rec.state})")
+                rec.release()
+                null
+            } else {
+                rec
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException creating AudioRecord: ${e.message}", e)
+            lastError = "Permission denied: RECORD_AUDIO"
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create AudioRecord: ${e.message}", e)
+            null
+        }
+    }
 
     /** A=true bypass raw signal, B=false processed signal when a chain exists. */
     @Volatile
@@ -56,6 +163,15 @@ class AudioCaptureThread(
     /** Current processing chain; null means passthrough. */
     @Volatile
     var filterChain: BiquadFilterChain? = null
+
+    /** Output gain multiplier (0.0 to 1.0) applied before writing to AudioTrack. */
+    @Volatile
+    var outputGain: Float = 1.0f
+
+    /**
+     * Optional callback for fatal errors that cannot be recovered from within the thread.
+     */
+    var onFatalError: ((String) -> Unit)? = null
 
     /**
      * Start the capture thread. Call from engine start.
@@ -101,33 +217,25 @@ class AudioCaptureThread(
             minBuf = AudioRecord.getMinBufferSize(activeSampleRate, channelConfig, audioFormat)
         }
         if (minBuf <= 0) {
-            Log.e(TAG, "getMinBufferSize returned $minBuf — cannot record")
+            val err = "getMinBufferSize returned $minBuf — cannot record"
+            Log.e(TAG, err)
+            lastError = err
             running = false
             return
         }
 
-        // Use at least 2× the frame size, or the system minimum — whichever is larger
-        val bufferSize = maxOf(minBuf, frameSize * 2 * 2) // *2 for 16-bit (2 bytes/sample)
-
-        try {
-            recorder = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                activeSampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create AudioRecord", e)
-            running = false
-            return
+        // FIX 2: Use at least 2× the frame size for MIC, or 8x for MEDIA_PROJECTION to reduce CPU pressure
+        val bufferSize = if (captureSource == CaptureSource.MEDIA_PROJECTION) {
+            maxOf(minBuf, frameSize * 2 * 8) // *2 for 16-bit, *8 for larger system buffer
+        } else {
+            maxOf(minBuf, frameSize * 2 * 2) // *2 for 16-bit, *2 for small low-latency buffer
         }
 
-        val rec = recorder!!
-        if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord not initialised (state=${rec.state})")
-            rec.release()
-            recorder = null
+        recorder = buildAudioRecord(activeSampleRate, channelConfig, audioFormat, bufferSize)
+        if (recorder == null) {
+            val err = "Failed to initialize AudioRecord"
+            lastError = err
+            onFatalError?.invoke(err)
             running = false
             return
         }
@@ -151,7 +259,8 @@ class AudioCaptureThread(
             try {
                 AudioTrack(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        // FIX 3: Use USAGE_ASSISTANCE_SONIFICATION to avoid feedback/system capture loops
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build(),
                     AudioFormat.Builder()
@@ -176,17 +285,72 @@ class AudioCaptureThread(
         }
 
         try {
-            rec.startRecording()
+            recorder?.startRecording()
             Log.i(TAG, "AudioRecord started (rate=$activeSampleRate, bufferSize=$bufferSize, minBuf=$minBuf)")
 
             while (running) {
                 val captureStartNs = System.nanoTime()
 
                 // Read a full frame of 16-bit PCM
-                val samplesRead = rec.read(shortBuffer, 0, frameSize)
+                var rec = recorder
+                if (rec == null) {
+                    sleep(10)
+                    continue
+                }
+
+                var samplesRead = rec.read(shortBuffer, 0, frameSize)
                 if (samplesRead <= 0) {
-                    // ERROR or no data — yield and retry
-                    sleep(5)
+                    // FIX 1: Prevent spinning on errors.
+                    when (samplesRead) {
+                        AudioRecord.ERROR_INVALID_OPERATION -> Log.e(TAG, "read() returned ERROR_INVALID_OPERATION")
+                        AudioRecord.ERROR_BAD_VALUE -> Log.e(TAG, "read() returned ERROR_BAD_VALUE")
+                        AudioRecord.ERROR_DEAD_OBJECT -> Log.w(TAG, "read() returned ERROR_DEAD_OBJECT")
+                        0 -> {} // No data available yet
+                        else -> Log.w(TAG, "read() returned unknown error: $samplesRead")
+                    }
+
+                    if (samplesRead == AudioRecord.ERROR_DEAD_OBJECT) {
+                        Log.w(TAG, "AudioRecord DEAD_OBJECT detected, attempting recovery...")
+                        rec.release()
+                        recorder = null
+                        
+                        var success = false
+                        for (retry in 1..5) {
+                            sleep(retry * 100L) // backoff
+                            val newRec = buildAudioRecord(activeSampleRate, channelConfig, audioFormat, bufferSize)
+                            if (newRec != null) {
+                                try {
+                                    newRec.startRecording()
+                                    recorder = newRec
+                                    success = true
+                                    Log.i(TAG, "AudioRecord recovered on retry $retry")
+                                    break
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Retry $retry startRecording failed", e)
+                                    newRec.release()
+                                }
+                            }
+                        }
+                        if (!success) {
+                            val err = "Fatal: AudioRecord recovery failed after 5 retries"
+                            Log.e(TAG, err)
+                            lastError = err
+                            onFatalError?.invoke(err)
+                            running = false
+                            break
+                        }
+                    } else if (samplesRead < 0) {
+                        // Other negative error codes: stop to avoid ANR spin
+                        val err = "Unrecoverable AudioRecord error: $samplesRead"
+                        Log.e(TAG, err)
+                        lastError = err
+                        onFatalError?.invoke(err)
+                        running = false
+                        break
+                    } else {
+                        // samplesRead == 0: yield and retry with sleep to reduce CPU pressure
+                        sleep(100)
+                    }
                     continue
                 }
 
@@ -215,13 +379,13 @@ class AudioCaptureThread(
                 // --- Capture latency (time from read start to analysis done) ---
                 val captureLatencyMs = (System.nanoTime() - captureStartNs) / 1_000_000f
 
-                latestResult = AnalysisResult(
-                    rms = rms,
-                    spectralCentroid = centroid,
-                    classification = classification,
-                    confidence = confidence,
-                    captureLatencyMs = captureLatencyMs
-                )
+                synchronized(resultLock) {
+                    internalResult.rms = rms
+                    internalResult.spectralCentroid = centroid
+                    internalResult.classification = classification
+                    internalResult.confidence = confidence
+                    internalResult.captureLatencyMs = captureLatencyMs
+                }
 
                 // Route audio to output as either bypass or processed signal.
                 System.arraycopy(floatBuffer, 0, processBuffer, 0, samplesRead)
@@ -229,19 +393,33 @@ class AudioCaptureThread(
                 if (!bypassMode && chain != null && !chain.isEmpty) {
                     chain.process(processBuffer, samplesRead)
                 }
+
+                // Apply output gain (ducking)
+                val gain = outputGain
+                if (gain != 1.0f) {
+                    for (i in 0 until samplesRead) {
+                        processBuffer[i] *= gain
+                    }
+                }
+
                 outputTrack?.let { track ->
                     writeToTrackBlocking(track, processBuffer, samplesRead)
                 }
             }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException in capture thread: ${e.message}", e)
+            lastError = "Permission denied: RECORD_AUDIO"
+            onFatalError?.invoke(lastError!!)
+            running = false
         } catch (e: Exception) {
             Log.e(TAG, "Capture loop error", e)
         } finally {
             try {
-                rec.stop()
+                recorder?.stop()
             } catch (e: Exception) {
                 Log.w(TAG, "AudioRecord.stop() failed", e)
             }
-            rec.release()
+            recorder?.release()
             recorder = null
             try {
                 outputTrack?.stop()
@@ -341,6 +519,28 @@ class AudioCaptureThread(
             }
             break
         }
+    }
+
+    /**
+     * Helper to detect if we are running on an Android emulator.
+     */
+    private fun isEmulator(): Boolean {
+        return (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                || Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.HARDWARE.contains("goldfish")
+                || Build.HARDWARE.contains("ranchu")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.MANUFACTURER.contains("Genymotion")
+                || Build.PRODUCT.contains("sdk_google")
+                || Build.PRODUCT.contains("google_sdk")
+                || Build.PRODUCT.contains("sdk")
+                || Build.PRODUCT.contains("sdk_x86")
+                || Build.PRODUCT.contains("vbox86p")
+                || Build.PRODUCT.contains("emulator")
+                || Build.PRODUCT.contains("simulator")
     }
 }
 

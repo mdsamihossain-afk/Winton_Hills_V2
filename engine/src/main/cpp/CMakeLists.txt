@@ -12,9 +12,12 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 find_library(log_lib log)
 find_library(aaudio_lib aaudio)
 
+find_package(oboe REQUIRED CONFIG)
+
 target_link_libraries(${CMAKE_PROJECT_NAME}
     android
     ${log_lib}
+    oboe::oboe
 )
 
 # AAudio is only available on API 26+

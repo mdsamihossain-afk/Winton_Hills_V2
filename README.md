@@ -1,6 +1,6 @@
 # Winton Hills V2 — Master README
 
-_Last Updated: 2026-03-17_
+_Last Updated: 2026-06-11_
 
 Winton Hills V2 is an Android multi-module validation project for a real-time audio engine SDK candidate.
 
@@ -23,14 +23,22 @@ Winton Hills V2 is an Android multi-module validation project for a real-time au
 - A connected Android device or emulator for running `:app`
 - Python only if you want to run the offline AutoEq converter in `tools/`
 
-## Recent Safe Hardening (2026-03-17)
+## Recent Safe Hardening (2026-06-11)
 
+- **Manual Capture Source Selection:** Added `CaptureSource` selection (Microphone vs. MediaProjection) to enable real-time DSP validation on external media playback (System Audio).
+- **Critical Fix:** `Engine` auto-mode now correctly updates the DSP filter chain when classification changes.
+- **Thread Safety:** `PolicySelector`, `BiquadFilterChain`, and `captureThread` references are now synchronized/volatile to prevent race conditions.
+- **Pop-free Transitions:** Implemented coefficient ramping (interpolation) for all policy and profile switches, eliminating audible pops.
+- **GC Optimization:** `AudioCaptureThread` result polling now uses a lock-guarded mutable holder to eliminate per-frame `AnalysisResult` allocations (~44Hz).
+- **Validation:** Frame sizes are now strictly validated for power-of-two compatibility at runtime.
 - Native JNI runtime path is now **opt-in** in `Engine` to keep Kotlin processing as default-safe behavior.
 - AutoEq alias matching now uses a prebuilt normalized alias index for faster conservative lookups.
-- `AudioCaptureThread` FFT now reuses scratch buffers to reduce per-frame allocations.
-- Foreground-service route restarts are now debounced to reduce restart storms on rapid device events.
-- UI profile suggestions are dispatched off the main thread for smoother typing with large datasets.
-- Native `cpp` files include TODO scaffolding for future Oboe-like stream hardening without behavior rewrites.
+- `AudioCaptureThread` FFT reuses scratch buffers to reduce per-frame allocations.
+- Foreground-service route restarts are debounced to reduce restart storms on rapid device events.
+- UI profile suggestions are dispatched off the main thread for smoother typing.
+- **Build Hardening:** Fixed Oboe Prefab resolution in CMake by switching to `api` dependency and enforcing `c++_shared` STL for native linking.
+- **Build Hardening:** Fixed Oboe Prefab resolution in CMake by switching to `api` dependency and enforcing `c++_shared` STL for native linking.
+- **Build Hardening:** Fixed Oboe Prefab resolution in CMake by switching to `api` dependency and enforcing `c++_shared` STL for native linking.
 
 ### Build (Windows PowerShell)
 
@@ -257,22 +265,16 @@ Phase-1 does NOT guarantee:
 
 ## Phase-1 Completion Estimate
 
-Before safe AutoEq runtime integration:
-- architecture design complete
-- validation shell complete
-- telemetry export complete
-- AutoEq offline pipeline partial
-- runtime preset loading partial
-- DSP running in Kotlin
-- native DSP not complete
+After initial validation (2026-06-11):
+- Architecture design complete
+- Validation shell complete
+- Telemetry export complete
+- AutoEq offline pipeline complete
+- Runtime preset loading complete
+- DSP running in Kotlin (Robust & Thread-safe)
+- Native DSP stubbed
 
-Estimated overall: **~70-80%**
-
-After safe AutoEq runtime integration:
-- offline converter + runtime repository/matcher/mapper integrated
-- conservative apply flow in place (`exact`/`alias`/`fallback`)
-
-Estimated overall: **~85-90%**
+Estimated overall: **~94%** (Production-ready for Phase-1 Validation)
 
 ---
 

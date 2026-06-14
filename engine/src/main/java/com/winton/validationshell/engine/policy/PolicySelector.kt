@@ -27,6 +27,7 @@ class PolicySelector {
      * @param currentTimeMs monotonic time in ms (e.g., SystemClock.elapsedRealtime())
      * @return the selected [PolicyConfig]
      */
+    @Synchronized
     fun select(
         classification: Int,
         confidence: Float,
@@ -83,13 +84,16 @@ class PolicySelector {
     }
 
     /** Force a specific policy (manual mode). */
+    @Synchronized
     fun forcePolicy(policyId: Int) {
         currentPolicyId = policyId
         resetPending()
     }
 
+    @Synchronized
     fun getCurrentPolicyId(): Int = currentPolicyId
 
+    @Synchronized
     private fun resetPending() {
         pendingPolicyId = null
         pendingStartTimeMs = 0L

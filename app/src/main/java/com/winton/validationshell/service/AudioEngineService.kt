@@ -11,6 +11,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.projection.MediaProjection
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
@@ -21,6 +22,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.winton.validationshell.MainActivity
+import com.winton.validationshell.engine.CaptureSource
 import com.winton.validationshell.engine.Engine
 import com.winton.validationshell.engine.TelemetrySnapshot
 import com.winton.validationshell.engine.hardware.HardwareProfile
@@ -49,6 +51,8 @@ class AudioEngineService : Service() {
         private const val CHANNEL_ID = "audio_engine_channel"
         private const val NOTIFICATION_ID = 1
         const val ACTION_STOP = "com.winton.validationshell.STOP_ENGINE"
+        const val ACTION_START_PROJECTION = "com.winton.validationshell.START_PROJECTION"
+        const val EXTRA_RESULT_DATA = "extra_result_data"
     }
 
     // --- Engine ---
@@ -64,11 +68,39 @@ class AudioEngineService : Service() {
     private val _isEngineOn = MutableStateFlow(false)
     val isEngineOn: StateFlow<Boolean> = _isEngineOn.asStateFlow()
 
+    private val _engineHealth = MutableStateFlow("Initializing...")
+    val engineHealth: StateFlow<String> = _engineHealth.asStateFlow()
+
+    private val _captureSource = MutableStateFlow(CaptureSource.MICROPHONE)
+    val captureSource: StateFlow<CaptureSource> = _captureSource.asStateFlow()
+
     private val _activePolicy = MutableStateFlow(PolicyConfig.PASSTHROUGH)
 
     // --- Audio focus ---
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
+    private val serviceHandler = Handler(Looper.getMainLooper())
+
+    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                Log.w(TAG, "Audio focus lost — stopping engine")
+                stopEngine()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                Log.i(TAG, "Audio focus lost transiently — ducking to 0.1")
+                engine.setGain(0.1f)
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                Log.i(TAG, "Audio focus transient can duck — ducking to 0.2")
+                engine.setGain(0.2f)
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.d(TAG, "Audio focus gained — restoring gain")
+                engine.setGain(1.0f)
+            }
+        }
+    }
 
     // --- Route change detection ---
     private var deviceCallback: AudioDeviceCallback? = null
@@ -109,15 +141,57 @@ class AudioEngineService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopEngine()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopEngine()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_START_PROJECTION -> {
+                Log.d(TAG, "ACTION_START_PROJECTION received")
+                val resultData = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(EXTRA_RESULT_DATA)
+                }
+                promoteToForegroundWithProjection(resultData)
+            }
         }
-        // Don't call startForeground here — we do it in startEngine() when
-        // permissions are confirmed. This avoids the API 34+ crash.
+        // Don't call startForeground here for general starts — we do it in startEngine() 
+        // or promoteToForegroundWithProjection().
         return START_STICKY
+    }
+
+    private fun promoteToForegroundWithProjection(resultData: Intent? = null) {
+        try {
+            val notifText = "System Audio Capture Active"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification(notifText),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, buildNotification(notifText))
+            }
+
+            // Now that we are definitely foreground, create the projection if data was provided
+            if (resultData != null) {
+                val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+                val projection = mpm.getMediaProjection(android.app.Activity.RESULT_OK, resultData)
+                setMediaProjection(projection)
+                setCaptureSource(CaptureSource.MEDIA_PROJECTION)
+                
+                // If the engine should start automatically when projection is granted:
+                if (!_isEngineOn.value) {
+                    startEngine()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground for projection", e)
+        }
     }
 
     override fun onDestroy() {
@@ -140,6 +214,7 @@ class AudioEngineService : Service() {
         // Resolve hardware
         val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         currentProfile = engine.resolveHardware(devices)
+        _captureSource.value = engine.getCaptureSource()
 
         // Try conservative AutoEq lookup by output-device label; no match stays neutral.
         val requestedProfileName = preferredOutputName(devices)
@@ -171,10 +246,18 @@ class AudioEngineService : Service() {
                     }
                     val notifText = "Engine Running · ${currentProfile.routeType.name}"
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        // FIX: Include MEDIA_PROJECTION type if active to prevent Android 14 crash
+                        var fgTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        
+                        if (_captureSource.value == CaptureSource.MEDIA_PROJECTION) {
+                            fgTypes = fgTypes or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                        }
+
                         startForeground(
                             NOTIFICATION_ID,
                             buildNotification(notifText),
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                            fgTypes
                         )
                     } else {
                         startForeground(NOTIFICATION_ID, buildNotification(notifText))
@@ -241,6 +324,17 @@ class AudioEngineService : Service() {
 
     fun suggestProfiles(query: String, limit: Int = 8): List<String> = engine.suggestProfiles(query, limit)
 
+    fun setCaptureSource(source: CaptureSource) {
+        engine.setCaptureSource(source)
+        _captureSource.value = source
+    }
+
+    fun setMediaProjection(projection: MediaProjection?) {
+        engine.setMediaProjection(projection)
+    }
+
+    fun getCaptureSource(): CaptureSource = engine.getCaptureSource()
+
     // ========================================================================
     // ANALYSIS POLLING
     // ========================================================================
@@ -250,6 +344,9 @@ class AudioEngineService : Service() {
         pollingJob = serviceScope.launch {
             while (isActive) {
                 try {
+                    // Update health status every poll cycle
+                    _engineHealth.value = engine.healthCheck(this@AudioEngineService)
+
                     if (_isEngineOn.value) {
                         val data = engine.getAnalysisData()
                         val snap = TelemetrySnapshot.fromFloatArray(data)
@@ -280,35 +377,15 @@ class AudioEngineService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
                 .setAudioAttributes(attrs)
                 .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { focusChange ->
-                    when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS -> {
-                            Log.w(TAG, "Audio focus lost — stopping engine")
-                            stopEngine()
-                        }
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            Log.w(TAG, "Audio focus lost transiently — pausing engine")
-                            // Only stop the engine internals, keep _isEngineOn true
-                            // so we can restart on GAIN without user interaction
-                            engine.stopAudioEngine()
-                        }
-                        AudioManager.AUDIOFOCUS_GAIN -> {
-                            Log.d(TAG, "Audio focus gained")
-                            if (_isEngineOn.value && !engine.isRunning()) {
-                                Log.d(TAG, "Resuming engine after transient loss")
-                                engine.startAudioEngine(currentProfile.forceConservative)
-                            }
-                        }
-                    }
-                }
+                .setOnAudioFocusChangeListener(focusChangeListener, serviceHandler)
                 .build()
             am.requestAudioFocus(focusRequest!!)
         } else {
             @Suppress("DEPRECATION")
-            am.requestAudioFocus({ }, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+            am.requestAudioFocus(focusChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
         }
     }
 
@@ -357,43 +434,48 @@ class AudioEngineService : Service() {
             return
         }
 
-        val oldRoute = currentProfile.routeType
-        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        currentProfile = engine.resolveHardware(devices)
+        try {
+            val oldRoute = currentProfile.routeType
+            val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            currentProfile = engine.resolveHardware(devices)
 
-        val requestedProfileName = preferredOutputName(devices)
-        if (!requestedProfileName.isNullOrBlank()) {
-            engine.loadProfileByName(requestedProfileName)
-            Log.d(TAG, "AutoEq telemetry: ${engine.getProfileMatchTelemetry()}")
-        }
-
-        val newRoute = currentProfile.routeType
-
-        if (oldRoute != newRoute) {
-            Log.i(TAG, "Route changed ($reason): $oldRoute → $newRoute")
-
-            if (_isEngineOn.value) {
-                // If new route demands conservative mode, apply it
-                if (currentProfile.forceConservative) {
-                    engine.setPolicy(PolicyConfig.CONSERVATIVE.id)
-                    _activePolicy.value = PolicyConfig.CONSERVATIVE
-                    Log.i(TAG, "Forced conservative mode for $newRoute")
-                }
-
-                // Restart the engine internals to pick up new sample rate / buffer size
-                routeRestartInProgress = true
-                try {
-                    engine.stopAudioEngine()
-                    engine.startAudioEngine(currentProfile.forceConservative)
-                    lastRouteRestartMs = SystemClock.elapsedRealtime()
-                    Log.i(TAG, "Restarted engine for new route $newRoute")
-                } finally {
-                    routeRestartInProgress = false
-                }
-
-                // Update notification to show current route
-                updateNotification("Engine Running · ${newRoute.name}")
+            val requestedProfileName = preferredOutputName(devices)
+            if (!requestedProfileName.isNullOrBlank()) {
+                engine.loadProfileByName(requestedProfileName)
+                Log.d(TAG, "AutoEq telemetry: ${engine.getProfileMatchTelemetry()}")
             }
+
+            val newRoute = currentProfile.routeType
+
+            if (oldRoute != newRoute) {
+                Log.i(TAG, "Route changed ($reason): $oldRoute → $newRoute")
+
+                if (_isEngineOn.value) {
+                    // If new route demands conservative mode, apply it
+                    if (currentProfile.forceConservative) {
+                        engine.setPolicy(PolicyConfig.CONSERVATIVE.id)
+                        _activePolicy.value = PolicyConfig.CONSERVATIVE
+                        Log.i(TAG, "Forced conservative mode for $newRoute")
+                    }
+
+                    // Restart the engine internals to pick up new sample rate / buffer size
+                    routeRestartInProgress = true
+                    try {
+                        engine.stopAudioEngine()
+                        engine.startAudioEngine(currentProfile.forceConservative)
+                        lastRouteRestartMs = SystemClock.elapsedRealtime()
+                        Log.i(TAG, "Restarted engine for new route $newRoute")
+                    } finally {
+                        routeRestartInProgress = false
+                    }
+
+                    // Update notification to show current route
+                    updateNotification("Engine Running · ${newRoute.name}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Critical failure in onRouteChanged (System service crash?)", e)
+            _engineHealth.value = "System Error: ${e.message}"
         }
     }
 

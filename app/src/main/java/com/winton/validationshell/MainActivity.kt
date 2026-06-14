@@ -2,10 +2,12 @@ package com.winton.validationshell
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.winton.validationshell.service.AudioEngineService
+import com.winton.validationshell.engine.CaptureSource
 import com.winton.validationshell.engine.TelemetrySnapshot
 import com.winton.validationshell.engine.policy.PolicyConfig
 import com.winton.validationshell.ui.theme.MyApplicationTheme
@@ -41,6 +44,7 @@ class MainActivity : ComponentActivity() {
 
     private var engineService: AudioEngineService? by mutableStateOf(null)
     private var serviceBound by mutableStateOf(false)
+    private var isBound = false
 
     // Logging
     private val logger = SessionLogger()
@@ -85,6 +89,27 @@ class MainActivity : ComponentActivity() {
         Log.d(TAG, "POST_NOTIFICATIONS granted=$isGranted")
     }
 
+    private val projectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            // Pass the result data to the service. The service will:
+            // 1. Call startForeground() with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            // 2. Create the MediaProjection object safely while in the foreground
+            val serviceIntent = Intent(this, AudioEngineService::class.java).apply {
+                action = AudioEngineService.ACTION_START_PROJECTION
+                putExtra(AudioEngineService.EXTRA_RESULT_DATA, result.data)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } else {
+            Log.w(TAG, "Media projection permission denied")
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -109,8 +134,8 @@ class MainActivity : ComponentActivity() {
 
         // Bind to the engine service (it will promote to foreground when engine starts)
         val serviceIntent = Intent(this, AudioEngineService::class.java)
-        val bound = bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
-        Log.d("MainActivity", "bindService returned: $bound")
+        isBound = bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
+        Log.d("MainActivity", "bindService returned: $isBound")
 
         setContent {
             MyApplicationTheme {
@@ -129,6 +154,9 @@ class MainActivity : ComponentActivity() {
     private fun ServiceBoundUI(service: AudioEngineService) {
         val isEngineOn by service.isEngineOn.collectAsState()
         val snapshot by service.snapshot.collectAsState()
+        val engineHealth by service.engineHealth.collectAsState()
+        val currentCaptureSource by service.captureSource.collectAsState()
+        
         @Suppress("ASSIGNED_VALUE_IS_NEVER_READ")
         var selectedPolicy by remember { mutableIntStateOf(AUTO_POLICY_ID) }
         @Suppress("ASSIGNED_VALUE_IS_NEVER_READ")
@@ -178,8 +206,10 @@ class MainActivity : ComponentActivity() {
             ValidationShellUI(
                 snapshot = snapshot,
                 isEngineOn = isEngineOn,
+                engineHealth = engineHealth,
                 selectedPolicy = selectedPolicy,
                 isBMode = isBMode,
+                captureSource = currentCaptureSource,
                 onToggleEngine = { turnOn ->
                     if (turnOn) {
                         if (checkPermission()) {
@@ -189,6 +219,14 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         stopEngineViaService()
+                    }
+                },
+                onCaptureSourceSelected = { source ->
+                    if (source == CaptureSource.MEDIA_PROJECTION) {
+                        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        projectionLauncher.launch(manager.createScreenCaptureIntent())
+                    } else {
+                        service.setCaptureSource(CaptureSource.MICROPHONE)
                     }
                 },
                 onPolicySelected = { policyId ->
@@ -363,9 +401,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (serviceBound) {
+        if (isBound) {
             unbindService(serviceConnection)
-            serviceBound = false
+            isBound = false
         }
         super.onDestroy()
     }
@@ -380,9 +418,12 @@ class MainActivity : ComponentActivity() {
 fun ValidationShellUI(
     snapshot: TelemetrySnapshot?,
     isEngineOn: Boolean,
+    engineHealth: String,
     selectedPolicy: Int,
     isBMode: Boolean,
+    captureSource: CaptureSource,
     onToggleEngine: (Boolean) -> Unit,
+    onCaptureSourceSelected: (CaptureSource) -> Unit,
     onPolicySelected: (Int) -> Unit,
     onABToggle: (Boolean) -> Unit,
     onExportLogs: () -> Unit,
@@ -431,6 +472,12 @@ fun ValidationShellUI(
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = engineHealth,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     if (isEngineOn) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
@@ -445,6 +492,31 @@ fun ValidationShellUI(
 
             // --- Analysis Data ---
             AnalysisPanel(snapshot)
+
+            // --- Capture Source ---
+            Text("Capture Source", style = MaterialTheme.typography.titleMedium)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = (captureSource == CaptureSource.MICROPHONE),
+                            onClick = { onCaptureSourceSelected(CaptureSource.MICROPHONE) }
+                        )
+                        Text("Microphone", modifier = Modifier.padding(start = 8.dp))
+                        
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        RadioButton(
+                            selected = (captureSource == CaptureSource.MEDIA_PROJECTION),
+                            onClick = { onCaptureSourceSelected(CaptureSource.MEDIA_PROJECTION) }
+                        )
+                        Text("System Audio", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
 
             // --- Processing Policy ---
             Text("Processing Policy", style = MaterialTheme.typography.titleMedium)

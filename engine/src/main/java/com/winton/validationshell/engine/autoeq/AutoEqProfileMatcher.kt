@@ -6,35 +6,72 @@ package com.winton.validationshell.engine.autoeq
  */
 object AutoEqProfileMatcher {
 
-    fun suggestByName(query: String, limit: Int = 8): List<String> {
-        val normalizedQuery = AutoEqNameNormalizer.normalize(query)
+    /**
+     * Aggressive normalization for fuzzy matching.
+     * Strips all non-alphanumeric characters and spaces.
+     */
+    private fun fuzzyNormalize(value: String): String {
+        return value.lowercase().filter { it.isLetterOrDigit() }
+    }
+
+    fun suggestByName(query: String, limit: Int = 5): List<String> {
+        val normalizedQuery = fuzzyNormalize(query)
         if (normalizedQuery.isEmpty()) return emptyList()
 
-        val scored = mutableMapOf<String, Int>()
-        AutoEqProfileRepository.allProfiles().forEach { profile ->
+        val profiles = AutoEqProfileRepository.allProfiles()
+        val results = profiles.map { profile ->
             val displayName = "${profile.manufacturer} ${profile.name}".trim()
-            var bestScore = scoreMatch(normalizedQuery, profile.normalizedName)
+            val normalizedTarget = fuzzyNormalize(displayName)
+            
+            // Calculate distance to full name
+            var minDistance = levenshteinDistance(normalizedQuery, normalizedTarget)
+            
+            // Also check distance to just the model name
+            val modelDistance = levenshteinDistance(normalizedQuery, fuzzyNormalize(profile.name))
+            if (modelDistance < minDistance) minDistance = modelDistance
 
+            // And aliases
             profile.aliases.forEach { alias ->
-                val aliasScore = scoreMatch(normalizedQuery, AutoEqNameNormalizer.normalize(alias))
-                if (aliasScore > bestScore) bestScore = aliasScore
+                val aliasDistance = levenshteinDistance(normalizedQuery, fuzzyNormalize(alias))
+                if (aliasDistance < minDistance) minDistance = aliasDistance
             }
 
-            if (bestScore > 0) {
-                val existing = scored[displayName] ?: Int.MIN_VALUE
-                if (bestScore > existing) scored[displayName] = bestScore
-            }
+            displayName to minDistance
         }
 
-        return scored.entries
-            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key.lowercase() })
-            .map { it.key }
+        return results
+            .sortedBy { it.second }
             .take(limit.coerceIn(1, 20))
+            .map { it.first }
+    }
+
+    private fun levenshteinDistance(s1: String, s2: String): Int {
+        if (s1 == s2) return 0
+        if (s1.isEmpty()) return s2.length
+        if (s2.isEmpty()) return s1.length
+
+        val dp = IntArray(s2.length + 1) { it }
+        for (i in 1..s1.length) {
+            var prev = dp[0]
+            dp[0] = i
+            for (j in 1..s2.length) {
+                val temp = dp[j]
+                if (s1[i - 1] == s2[j - 1]) {
+                    dp[j] = prev
+                } else {
+                    dp[j] = 1 + minOf(prev, minOf(dp[j - 1], dp[j]))
+                }
+                prev = temp
+            }
+        }
+        return dp[s2.length]
     }
 
     fun matchByName(requestedName: String): AutoEqMatch {
         val normalized = AutoEqNameNormalizer.normalize(requestedName)
-        if (normalized.isEmpty()) {
+        val fuzzyReq = fuzzyNormalize(requestedName)
+        
+        if (fuzzyReq.isEmpty()) {
             return AutoEqMatch(
                 requestedName = requestedName,
                 normalizedRequest = normalized,
@@ -46,25 +83,58 @@ object AutoEqProfileMatcher {
             )
         }
 
+        // 1. Exact matches (high confidence)
         AutoEqProfileRepository.findByNormalizedName(normalized)?.let {
-            return AutoEqMatch(
-                requestedName = requestedName,
-                normalizedRequest = normalized,
-                profile = it,
-                matchSource = "normalized_exact",
-                confidence = 1f,
-                fallbackUsed = false
-            )
+            return AutoEqMatch(requestedName, normalized, it, "normalized_exact", 1f, false)
         }
 
-        val aliasMatch = AutoEqProfileRepository.findByNormalizedAlias(normalized)
-        if (aliasMatch != null) {
+        AutoEqProfileRepository.findByNormalizedAlias(normalized)?.let {
+            return AutoEqMatch(requestedName, normalized, it, "alias_exact", 0.95f, false)
+        }
+
+        // 2. Fuzzy match
+        val profiles = AutoEqProfileRepository.allProfiles()
+        var bestProfile: com.winton.validationshell.engine.autoeq.AutoEqProfile? = null
+        var minDistance = Int.MAX_VALUE
+        var bestMatchSource = "fuzzy"
+
+        for (profile in profiles) {
+            val targetFullName = fuzzyNormalize("${profile.manufacturer} ${profile.name}")
+            val targetModel = fuzzyNormalize(profile.name)
+            
+            val dFull = levenshteinDistance(fuzzyReq, targetFullName)
+            val dModel = levenshteinDistance(fuzzyReq, targetModel)
+            
+            val d = minOf(dFull, dModel)
+            if (d < minDistance) {
+                minDistance = d
+                bestProfile = profile
+            }
+            
+            for (alias in profile.aliases) {
+                val dAlias = levenshteinDistance(fuzzyReq, fuzzyNormalize(alias))
+                if (dAlias < minDistance) {
+                    minDistance = dAlias
+                    bestProfile = profile
+                    bestMatchSource = "fuzzy_alias"
+                }
+            }
+        }
+
+        // Confidence heuristic: 1.0 for distance 0, dropping as distance increases relative to length
+        val confidence = if (bestProfile != null) {
+            val maxLen = maxOf(fuzzyReq.length, 1)
+            (1.0f - (minDistance.toFloat() / maxLen)).coerceIn(0f, 1f)
+        } else 0f
+
+        // Only accept if confidence is reasonably high (e.g. > 0.7)
+        if (bestProfile != null && confidence > 0.7f) {
             return AutoEqMatch(
                 requestedName = requestedName,
                 normalizedRequest = normalized,
-                profile = aliasMatch,
-                matchSource = "alias_exact",
-                confidence = 0.95f,
+                profile = bestProfile,
+                matchSource = bestMatchSource,
+                confidence = confidence,
                 fallbackUsed = false
             )
         }
@@ -76,69 +146,9 @@ object AutoEqProfileMatcher {
             matchSource = "none",
             confidence = 0f,
             fallbackUsed = true,
-            reason = "no_exact_match"
+            reason = "no_confident_match"
         )
     }
 
-    private fun scoreMatch(query: String, target: String): Int {
-        if (query == target) return 420
-
-        val queryTokens = query.split(' ').filter { it.isNotBlank() }
-        val targetTokens = target.split(' ').filter { it.isNotBlank() }
-        if (queryTokens.isEmpty() || targetTokens.isEmpty()) return 0
-
-        var score = 0
-
-        // Strong exact/prefix behavior first.
-        if (target.startsWith(query)) score = maxOf(score, 320)
-        if (queryTokens.all { q -> targetTokens.any { t -> t.startsWith(q) } }) score = maxOf(score, 260)
-        if (target.contains(query)) score = maxOf(score, 180)
-
-        // Brand-first boost: first token in target usually maps to manufacturer.
-        val queryFirst = queryTokens.first()
-        val targetBrand = targetTokens.first()
-        if (targetBrand.startsWith(queryFirst)) score = maxOf(score, 300)
-        if (isOneEditOrEqual(queryFirst, targetBrand)) score = maxOf(score, 235)
-
-        // Typo-tolerant token match (bounded edit distance of 1) for suggestions only.
-        if (queryTokens.all { q -> targetTokens.any { t -> isOneEditOrEqual(q, t) || t.startsWith(q) } }) {
-            score = maxOf(score, 170)
-        }
-
-        return score
-    }
-
-    private fun isOneEditOrEqual(a: String, b: String): Boolean {
-        if (a == b) return true
-        val lenA = a.length
-        val lenB = b.length
-        if (kotlin.math.abs(lenA - lenB) > 1) return false
-
-        var i = 0
-        var j = 0
-        var edits = 0
-        while (i < lenA && j < lenB) {
-            if (a[i] == b[j]) {
-                i++
-                j++
-                continue
-            }
-
-            edits++
-            if (edits > 1) return false
-
-            when {
-                lenA > lenB -> i++
-                lenB > lenA -> j++
-                else -> {
-                    i++
-                    j++
-                }
-            }
-        }
-
-        if (i < lenA || j < lenB) edits++
-        return edits <= 1
-    }
 }
 
