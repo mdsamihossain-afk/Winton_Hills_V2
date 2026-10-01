@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Winton Hills V3: Next-Generation Adaptive Computational Audio Engine</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js for Interactive Visuals -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Mermaid.js for Architecture Diagrams -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <!-- MathJax for DSP Formulas -->
+    <script>
+        window.MathJax = {
+            tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] }
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        :root { --primary: #2563eb; --bg: #f9fafb; --text: #1f2937; --border: #e5e7eb; --card: #ffffff; }
+        body { font-family: 'Inter', sans-serif; line-height: 1.7; color: var(--text); background: var(--bg); margin: 0; padding: 2rem; }
+        .container { max-width: 1000px; margin: 0 auto; background: var(--card); padding: 3rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        h1 { color: #111827; font-size: 2.2rem; border-bottom: 3px solid var(--primary); padding-bottom: 0.5rem; margin-bottom: 2rem; }
+        h2 { color: #111827; margin-top: 2.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h3 { color: #374151; margin-top: 1.5rem; }
+        p { margin-bottom: 1rem; }
+        table { width: 100%; border-collapse: collapse; margin: 1.5rem 0; font-size: 0.95rem; }
+        th, td { padding: 12px; border: 1px solid var(--border); text-align: left; }
+        th { background: #f3f4f6; font-weight: 600; }
+        .mermaid { background: #f8fafc; padding: 1.5rem; border-radius: 8px; border: 1px solid var(--border); text-align: center; margin: 1.5rem 0; }
+        .interactive-chart { margin: 2rem 0; padding: 2rem; border: 1px solid var(--border); border-radius: 8px; background: #ffffff; }
+        .prompt-box { background: #1f2937; color: #e5e7eb; padding: 1.5rem; border-radius: 8px; font-family: 'Courier New', Courier, monospace; overflow-x: auto; font-size: 0.85rem; margin-top: 2rem; }
+        .highlight { font-weight: 600; color: var(--primary); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Winton Hills V3: Next-Generation Adaptive Computational Audio Engine</h1>
+    <p><strong>Prepared By:</strong> Chief Audio Systems Architect | <strong>Document Classification:</strong> Technical Design Specification</p>
+    
+    <h2>1. Executive Summary & System Evolution</h2>
+    <p>Winton Hills V2 served as a validation prototype demonstrating that real-time spectral analysis, heuristic rule-based policy selection, and dynamic biquad filtering could operate within an Android foreground service. However, V2 was severely bottlenecked by its JVM/Kotlin DSP runtime and static AutoEQ architecture.</p>
+    <p><strong>Version 3 (V3)</strong> represents a fundamental re-architecture into a production-grade, AI-driven computational audio SDK. By introducing a bifurcated control/data plane architecture, we shift the entire DSP and machine learning inference load to a low-latency <strong>Native C++ engine</strong> utilizing Google’s Oboe and Edge AI NPU acceleration.</p>
+
+    <h2>2. Overall Software Architecture [1-7]</h2>
+    <p>V3 strictly separates the UI and configuration layers from the real-time audio critical path. The JVM is prohibited from interacting with audio buffers.</p>
+    <ul>
+        <li><strong>Control Plane (Android/Kotlin) [6]:</strong> Manages the UI, Foreground Engine Service, hardware routing listeners, OTA model updates, and Policy configuration.</li>
+        <li><strong>Data Plane (Native C++17/20) [7]:</strong> A highly optimized, zero-allocation runtime. Memory allocation (e.g., <code>malloc</code>, <code>new</code>, STL vectors) is strictly banned inside the audio callback to prevent priority inversion.</li>
+        <li><strong>Component Responsibilities & IPC [4, 5]:</strong> Communication across the JNI boundary relies exclusively on Single-Producer, Single-Consumer (SPSC) lock-free ring buffers and <code>std::atomic</code> flags.</li>
+    </ul>
+
+    <div class="mermaid">
+    graph TD
+        subgraph Control Plane [Android Framework / Kotlin]
+            UI[User Interface]
+            FS[Foreground Service]
+            PM[Policy Manager]
+            OTA[OTA Updater]
+        end
+        subgraph JNI Boundary
+            JNI[JNI Bridge]
+            LFQ[SPSC Lock-Free Queues]
+        end
+        subgraph Data Plane [Native C++20]
+            CE[Core Engine]
+            Oboe[Oboe Stream]
+            FE[Feature Extractor]
+            NN[TFLite/ONNX Runtime]
+            DSP[IIR Biquad DSP]
+        end
+        UI --> FS --> PM --> JNI --> CE
+        CE --> Oboe
+        CE --> FE --> NN --> DSP
+        DSP <--> Oboe
+    </div>
+
+    <h2>3. Core Audio Pipeline & Hardware Optimization [8-10, 35-40]</h2>
+    <p>To compete with tier-one solutions, V3 targets a round-trip latency of < 20ms.</p>
+    <ul>
+        <li><strong>Oboe & Audio HAL [8, 9, 10]:</strong> V3 utilizes the Oboe C++ library, defaulting to the <strong>AAudio MMAP</strong> data path. Where supported by the OEM Audio HAL, this bypasses the standard Android <code>AudioFlinger</code> mixer, establishing direct memory-mapped buffer access with the ALSA driver.</li>
+        <li><strong>CPU Scheduling & Battery [37, 38]:</strong> The audio thread requests <code>SCHED_FIFO</code> real-time priority. Battery optimization is achieved by gating heavy ML inference, only running classification every 500ms rather than per-frame.</li>
+        <li><strong>Hardware Acceleration (GPU/NPU) [39, 40]:</strong> Neural inference delegates to the Android Neural Networks API (NNAPI). V3 actively probes the HAL for hardware capabilities [35], routing graph execution to the Hexagon NPU (Snapdragon) or Edge TPU (Tensor) to keep power draw under 50mW.</li>
+    </ul>
+
+    <h2>4. DSP Engine & Feature Extraction [11-17, 41, 42]</h2>
+    <p>The transition from heuristic rules (V2) to neural inference (V3) requires a robust feature extraction pipeline operating synchronously with the DSP chain.</p>
+    <ul>
+        <li><strong>Feature Extraction Pipeline [13]:</strong> The C++ engine windows the PCM stream, calculating real-time FFT, Mel-Frequency Cepstral Coefficients (MFCCs), and Zero-Crossing Rates (ZCR).</li>
+        <li><strong>On-Device Neural Inference [14-17]:</strong> A quantized (INT8) TinyML model runs via TensorFlow Lite C++ API. We also integrate ONNX Runtime for complex spatial audio topologies.</li>
+        <li><strong>DSP Architecture [11, 12]:</strong> Instead of heavy FIR filters, V3 utilizes cascaded IIR Biquad filters. Target curves are synthesized on the fly. To prevent "zipper noise" during AI-driven transitions, coefficients are smoothed using exponential interpolation:</li>
+    </ul>
+    <p style="text-align:center;">$y[n] = b_0 x[n] + b_1 x[n-1] + b_2 x[n-2] - a_1 y[n-1] - a_2 y[n-2]$</p>
+
+    <h2>5. Data Strategy & Privacy [18-23, 48, 49]</h2>
+    <ul>
+        <li><strong>Big-Data & Cloud Training [18, 19]:</strong> Models are trained on massive multi-environment acoustic corpora (Dataset Engineering [22]).</li>
+        <li><strong>Federated Learning & Privacy [20, 21]:</strong> Raw audio is <strong>never</strong> transmitted. V3 computes gradient weight deltas on-device based on user behavior (e.g., user lowers bass when model boosts it). Only encrypted, anonymized telemetry deltas are uploaded to the cloud.</li>
+        <li><strong>Security Model [48, 49]:</strong> Threat analysis dictates that malicious model injection is the highest risk. All OTA `.tflite` updates are cryptographically signed and verified by the C++ engine before execution.</li>
+    </ul>
+
+    <h2>6. Personalization & Acoustic Adaptation [24-34]</h2>
+    <p>V3 moves beyond static EQ. It is a fully adaptive recommendation and processing engine.</p>
+    <ul>
+        <li><strong>Hearing Profiles & Parametric Synthesis [24, 25, 33]:</strong> V3 discards static AutoEQ text files. It conducts an on-device pure-tone audiometry test, merges the user's hearing loss curve with the AutoEQ inverse hardware profile, and mathematically synthesizes optimal parametric bands using the Levenberg-Marquardt algorithm.</li>
+        <li><strong>Environmental & Music Classification [27, 28]:</strong> The CRNN classifies the environment (e.g., Transit, Office) and content (e.g., Speech, Jazz) and applies Dynamic EQ [31] and active Noise Suppression [30] parameters instantly.</li>
+    </ul>
+
+    <h2>7. Industry Competitive Analysis Matrix</h2>
+    <p>The following interactive radar chart benchmarks Winton Hills V3 against industry leaders across five core architectural pillars.</p>
+    
+    <div class="interactive-chart">
+        <canvas id="competitorChart" height="120"></canvas>
+    </div>
+
+    <h3>Detailed Subsystem Comparisons</h3>
+    <table>
+        <tr>
+            <th>Platform</th>
+            <th>Core Technology & Strategy</th>
+            <th>Winton Hills V3 Differentiation & Trade-offs</th>
+        </tr>
+        <tr>
+            <td><strong>Dolby</strong></td>
+            <td>Object-based Atmos rendering; spatial metadata decoding across hardware targets.</td>
+            <td>Winton V3 is an OS-layer AI PEQ, not an object decoder. Trade-off: Lacks multi-channel spatial routing, but provides vastly superior adaptive frequency correction.</td>
+        </tr>
+        <tr>
+            <td><strong>Apple</strong></td>
+            <td>Vertical silicon integration (H2 NPU); Photogrammetric HRTF via FaceID camera.</td>
+            <td>Apple is restricted to its walled garden. V3 offers hardware-agnostic Edge AI, applying advanced DSP to <i>any</i> connected Bluetooth or DAC device.</td>
+        </tr>
+        <tr>
+            <td><strong>Qualcomm</strong></td>
+            <td>B2B Snapdragon Sound silicon; Hexagon NPU executing sub-20ms noise suppression.</td>
+            <td>Qualcomm provides the raw hardware. V3 acts as the application layer that commands the NPU via NNAPI.</td>
+        </tr>
+        <tr>
+            <td><strong>Dirac</strong></td>
+            <td>Mixed-phase impulse response correction (time-domain alignment) using FIR/IIR hybrids.</td>
+            <td>Dirac prioritizes perfect transient response over latency. V3 uses IIR minimum-phase biquads for ultra-low latency mobile use, sacrificing strict phase alignment for battery efficiency.</td>
+        </tr>
+        <tr>
+            <td><strong>Sonarworks</strong></td>
+            <td>Dataset-driven static EQ targeting a perfectly flat studio reference curve.</td>
+            <td>Sonarworks relies on static profiles. V3 utilizes neural contextual adaptation to shift the target curve dynamically based on ambient noise.</td>
+        </tr>
+        <tr>
+            <td><strong>Wavelet</strong></td>
+            <td>Android <code>DynamicsProcessing</code> API hooks. Highly battery efficient.</td>
+            <td>Wavelet relies on OEM firmware, resulting in bugs and hardware band limits (e.g., Pixel 32-band limit). V3 processes in native C++, offering unlimited bands and bypassing OEM bugs.</td>
+        </tr>
+        <tr>
+            <td><strong>Equalizer314</strong></td>
+            <td>FOSS parametric UI utilizing both <code>DynamicsProcessing</code> and <code>Visualizer</code> APIs.</td>
+            <td>Similar to Wavelet, EQ314 is bound by the Android API ceiling. V3's Oboe architecture completely circumvents the Android audio framework's DSP limitations.</td>
+        </tr>
+    </table>
+
+    <h2>8. Production, CI/CD, and Future Roadmap [43-47, 50]</h2>
+    <ul>
+        <li><strong>Deployment [43-47]:</strong> V3 is designed as a standalone SDK that can be injected into 3rd-party media players (e.g., Poweramp, Spotify clones via ReVanced) or run as a local proxy service. CI/CD pipelines automate bit-perfect validation checks against Python DSP equivalents.</li>
+        <li><strong>Five-Year Roadmap [50]:</strong>
+            <ul>
+                <li><strong>Year 1-2 (V3.x):</strong> Native C++ stability, federated telemetry activation.</li>
+                <li><strong>Year 3 (V4.0):</strong> Implementation of photogrammetry-based personalized HRTF spatial rendering via ONNX.</li>
+                <li><strong>Year 4-5 (V5.0):</strong> Transition from Android SDK to B2B embedded firmware licensing (Qualcomm/Tensilica HiFi DSP targets), competing directly with Dirac's OEM integration model.</li>
+            </ul>
+        </li>
+    </ul>
+
+    <div class="prompt-box">
+        <strong>Appendix: Interactive Widget Architecture Prompt Preserved (Internal reference)</strong><br><br>
+        {<br>
+        &nbsp;&nbsp;"id": "audio-tech-radar-chart",<br>
+        &nbsp;&nbsp;"height": "700px",<br>
+        &nbsp;&nbsp;"prompt": "Objective: Create an interactive radar chart comparing Apple, Dolby, Sony, Qualcomm, Samsung, Dirac, and Sonarworks.\nData State: initialValues: Data comparing 7 companies across 5 axes: Hardware Integration, DSP Complexity, Edge AI Capability, Spatial Audio Tech, and Room/Ear Calibration on a 1-10 scale.\nStrategy: Standard Layout.\nLibraries: Recharts or D3.js.\nInputs: Checkboxes to toggle each of the 7 companies on or off.\nBehavior: Render a radar/spider chart with 5 axes. Plot polygons for the selected companies."<br>
+        }
+    </div>
+</div>
+
+<script>
+    // Initialize Mermaid Diagrams
+    mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+
+    // Initialize Interactive Radar Chart
+    document.addEventListener("DOMContentLoaded", function() {
+        const ctx = document.getElementById('competitorChart').getContext('2d');
+        const data = {
+            labels: ['Hardware Integration', 'DSP Complexity', 'Edge AI Capability', 'Spatial Audio Tech', 'Room/Ear Calibration'],
+            datasets: [
+                { label: 'Winton Hills V3', data: [4, 9, 8, 7, 8], backgroundColor: 'rgba(37, 99, 235, 0.2)', borderColor: '#2563eb', borderWidth: 2 },
+                { label: 'Apple (H2)', data: [10, 8, 10, 9, 6], backgroundColor: 'rgba(156, 163, 175, 0.2)', borderColor: '#9ca3af', borderWidth: 2, hidden: true },
+                { label: 'Dolby', data: [2, 10, 3, 10, 4], backgroundColor: 'rgba(220, 38, 38, 0.2)', borderColor: '#dc2626', borderWidth: 2, hidden: true },
+                { label: 'Dirac', data: [1, 10, 2, 6, 10], backgroundColor: 'rgba(16, 185, 129, 0.2)', borderColor: '#10b981', borderWidth: 2, hidden: true },
+                { label: 'Qualcomm', data: [8, 7, 9, 5, 3], backgroundColor: 'rgba(245, 158, 11, 0.2)', borderColor: '#f59e0b', borderWidth: 2, hidden: true }
+            ]
+        };
+
+        const config = {
+            type: 'radar',
+            data: data,
+            options: {
+                responsive: true,
+                plugins: {
+                    title: { display: true, text: 'Click Legend to Toggle Competitors On/Off', font: { size: 14 } },
+                    legend: { position: 'top', labels: { usePointStyle: true } }
+                },
+                scales: { r: { angleLines: { display: true }, suggestedMin: 0, suggestedMax: 10 } }
+            }
+        };
+        new Chart(ctx, config);
+    });
+</script>
+
+</body>
+</html>
