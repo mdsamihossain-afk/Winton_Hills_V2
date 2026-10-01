@@ -1,143 +1,143 @@
-#include <jni.h>
-#include <oboe/Oboe.h>
 #include <android/log.h>
-#include <memory>
-#include <mutex>
+#include <jni.h>
+
+#include <vector>
+
+#include "native_processing_engine.h"
 
 #define TAG "WintonNativeEngine"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
-class EngineCallback : public oboe::AudioStreamCallback {
-public:
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream *oboeStream, void *audioData, int32_t numFrames) override {
-        if (!audioData || numFrames <= 0) return oboe::DataCallbackResult::Continue;
+namespace {
 
-        // In a real implementation, we would process DSP here.
-        // For now, we just zero out the buffer (passthrough/silence) to be safe.
-        memset(audioData, 0, numFrames * oboeStream->getChannelCount() * sizeof(float));
+winton::native::NativeProcessingEngine gEngine;
 
-        return oboe::DataCallbackResult::Continue;
+std::vector<winton::native::BandConfig> parseBands(JNIEnv* env, jfloatArray bandsArray) {
+    std::vector<winton::native::BandConfig> bands;
+    if (bandsArray == nullptr) {
+        return bands;
     }
 
-    void onErrorBeforeClose(oboe::AudioStream *oboeStream, oboe::Result error) override {
-        LOGD("onErrorBeforeClose: %s", oboe::convertToText(error));
+    const jsize length = env->GetArrayLength(bandsArray);
+    if (length <= 0) {
+        return bands;
     }
 
-    void onErrorAfterClose(oboe::AudioStream *oboeStream, oboe::Result error) override {
-        if (error == oboe::Result::ErrorDisconnected) {
-            LOGD("Stream disconnected (routing change or unplug).");
-            // The stream is already closed. The Kotlin layer or a restart mechanism should handle reopening.
-        }
-    }
-};
+    const jint bandCount = length / 3;
+    bands.reserve(static_cast<std::size_t>(bandCount));
 
-struct Engine {
-    std::shared_ptr<oboe::AudioStream> stream;
-    std::shared_ptr<EngineCallback> callback;
-    std::mutex streamMutex;
-    bool isPausedForRouting = false;
-
-    Engine() : callback(std::make_shared<EngineCallback>()) {}
-
-    bool start(int sampleRate, int framesPerBurst) {
-        std::lock_guard<std::mutex> lock(streamMutex);
-        oboe::AudioStreamBuilder builder;
-        builder.setDirection(oboe::Direction::Output)
-               ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-               ->setSharingMode(oboe::SharingMode::Exclusive)
-               ->setFormat(oboe::AudioFormat::Float)
-               ->setChannelCount(oboe::ChannelCount::Stereo)
-               ->setSampleRate(sampleRate)
-               ->setFramesPerCallback(framesPerBurst)
-               ->setCallback(callback.get());
-
-        oboe::Result result = builder.openStream(stream);
-        if (result != oboe::Result::OK) {
-            LOGE("Failed to open stream: %s", oboe::convertToText(result));
-            return false;
-        }
-
-        result = stream->start();
-        if (result != oboe::Result::OK) {
-            LOGE("Failed to start stream: %s", oboe::convertToText(result));
-            stream->close();
-            return false;
-        }
-
-        isPausedForRouting = false;
-        return true;
+    jfloat* values = env->GetFloatArrayElements(bandsArray, nullptr);
+    if (values == nullptr) {
+        return bands;
     }
 
-    void stop() {
-        std::lock_guard<std::mutex> lock(streamMutex);
-        if (stream) {
-            stream->stop();
-            stream->close();
-            stream.reset();
-        }
+    for (jint i = 0; i < bandCount; ++i) {
+        bands.push_back({
+            values[i * 3],
+            values[i * 3 + 1],
+            values[i * 3 + 2]
+        });
     }
 
-    void pauseForRouting() {
-        std::lock_guard<std::mutex> lock(streamMutex);
-        if (stream && !isPausedForRouting) {
-            LOGD("Pausing stream for routing change...");
-            stream->pause();
-            isPausedForRouting = true;
-        }
-    }
-};
+    env->ReleaseFloatArrayElements(bandsArray, values, JNI_ABORT);
+    return bands;
+}
 
-static Engine gEngine;
+} // namespace
 
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_com_winton_validationshell_engine_Engine_nativeStartEngine(
-        JNIEnv* env,
-        jobject thiz,
+        JNIEnv*,
+        jobject,
         jboolean conservative,
         jint sampleRate,
         jint bufferSize) {
-    return gEngine.start(sampleRate, bufferSize) ? JNI_TRUE : JNI_FALSE;
+    return gEngine.start(sampleRate, bufferSize, conservative == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_winton_validationshell_engine_Engine_nativeStopEngine(
-        JNIEnv* env, jobject thiz) {
+        JNIEnv*, jobject) {
     gEngine.stop();
 }
 
 JNIEXPORT void JNICALL
 Java_com_winton_validationshell_engine_Engine_nativePauseForRoutingChange(
-        JNIEnv* env, jobject thiz) {
-    gEngine.pauseForRouting();
+        JNIEnv*, jobject) {
+    gEngine.pauseForRoutingChange();
 }
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_winton_validationshell_engine_Engine_nativeGetAnalysisData(
-        JNIEnv* env, jobject thiz) {
-    jfloatArray arr = env->NewFloatArray(8);
-    float data[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    env->SetFloatArrayRegion(arr, 0, 8, data);
+        JNIEnv* env, jobject) {
+    const auto data = gEngine.latestAnalysis();
+    jfloatArray arr = env->NewFloatArray(static_cast<jsize>(data.size()));
+    if (arr == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(data.size()), data.data());
     return arr;
 }
 
 JNIEXPORT void JNICALL
 Java_com_winton_validationshell_engine_Engine_nativeSetPolicy(
-        JNIEnv* env, jobject thiz, jint policyId, jfloatArray bands) {
-    // DSP parameters would be updated here.
+        JNIEnv* env, jobject, jint policyId, jfloatArray bands) {
+    gEngine.setPolicy(policyId, parseBands(env, bands));
+}
+
+JNIEXPORT void JNICALL
+Java_com_winton_validationshell_engine_Engine_nativeSetBypassMode(
+        JNIEnv*, jobject, jboolean bypass) {
+    gEngine.setBypassMode(bypass == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_winton_validationshell_engine_Engine_nativeSetAutoPolicyEnabled(
+        JNIEnv*, jobject, jboolean enabled) {
+    gEngine.setAutoPolicyEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_winton_validationshell_engine_Engine_nativeUpdateHardwareConstraints(
+        JNIEnv*, jobject, jboolean forceConservative, jboolean isBluetooth) {
+    gEngine.updateHardwareConstraints(forceConservative == JNI_TRUE, isBluetooth == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_winton_validationshell_engine_Engine_nativeSetNativeCaptureEnabled(
+        JNIEnv*, jobject, jboolean enabled) {
+    gEngine.setNativeCaptureEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_winton_validationshell_engine_Engine_nativeSubmitAudioFrame(
+        JNIEnv* env,
+        jobject,
+        jfloatArray samples,
+        jint frameSize,
+        jint sampleRate,
+        jlong captureTimestampNs) {
+    if (samples == nullptr || frameSize <= 0) {
+        return;
+    }
+
+    jfloat* values = env->GetFloatArrayElements(samples, nullptr);
+    if (values == nullptr) {
+        LOGW("nativeSubmitAudioFrame: failed to access PCM frame");
+        return;
+    }
+
+    gEngine.submitFrame(values, frameSize, sampleRate, static_cast<std::uint64_t>(captureTimestampNs));
+    env->ReleaseFloatArrayElements(samples, values, JNI_ABORT);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_winton_validationshell_engine_Engine_nativeGetLatencyMs(
-        JNIEnv* env, jobject thiz) {
-    std::lock_guard<std::mutex> lock(gEngine.streamMutex);
-    if (gEngine.stream) {
-        auto result = gEngine.stream->calculateLatencyMillis();
-        return result ? (jfloat)result.value() : -1.0f;
-    }
-    return -1.0f;
+        JNIEnv*, jobject) {
+    return gEngine.latencyMs();
 }
 
 }

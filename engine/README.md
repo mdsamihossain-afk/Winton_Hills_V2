@@ -1,12 +1,24 @@
 # Audio Engine SDK Overview
 
-_Last Updated: 2026-03-17_
+_Last Updated: 2026-09-11_
 
 Scope: `:engine` public API, analysis path, and Phase-1 readiness notes.
 
 Canonical Phase-1 boundaries and completion estimates are maintained in:
 - `README.md`
 - `docs/phase1_validation.md`
+
+## What's Changed (2026-06-11)
+
+### Critical Bug Fixes
+- **Auto-mode Filter Updates**: Fixed a bug where switching policies in Auto-mode did not update the active `BiquadFilterChain`. The `Engine` now explicitly calls `updateEngineFilterChain()` upon classification changes.
+- **Thread Safety**: `captureThread` is now `@Volatile`. `PolicySelector` state-modifying methods are now `@Synchronized`. `BiquadFilterChain` methods are now `@Synchronized` to prevent race conditions during coefficient updates.
+- **Pop-free Ramping**: Implemented linear coefficient interpolation in `BiquadFilter`. Policy and profile switches now ramp over 50ms (configurable) to eliminate audible clicks and pops.
+- **Mathematical Validation**: Core DSP logic is cross-validated against a Python oracle on x86_64; the ARM/NDK runner and orchestration pipeline are implemented and ready for on-device execution when a device is connected.
+
+### Performance Optimizations
+- **GC Pressure Reduction**: `AudioCaptureThread` now uses a pre-allocated `MutableAnalysisResult` with a lock-guarded snapshot mechanism. FFT reuses scratch buffers (`fftReal`, `fftImag`, `fftMagnitudes`) to eliminate per-frame allocations.
+- **FFT Validation**: Added power-of-two validation for `frameSize` to ensure compatibility with the radix-2 FFT implementation.
 
 ## What's Changed (2026-03-17)
 
@@ -26,8 +38,8 @@ Canonical Phase-1 boundaries and completion estimates are maintained in:
 > Current status: the public SDK API is stable in Kotlin (`Engine.kt`).
 > Live mic analysis (RMS/centroid/classifier) runs in Kotlin via `AudioCaptureThread`.
 > Kotlin runtime DSP now includes an `AudioTrack` output path with a biquad chain for A/B validation.
-> JNI/native code remains wired but is still a stub.
-> Native runtime processing is now guarded behind explicit opt-in.
+> Native processing core is implemented (Biquads, FFT, ZCR); Oboe capture is operational but currently violates "Analysis on RAW" purity (processes before analysis).
+> Native runtime path is **PARTIALLY CERTIFIED** on ARM64 hardware.
 
 ## 1. Architecture
 
@@ -135,6 +147,7 @@ Choose one integration path depending on your setup:
 - **AutoEq Filter Coverage**: Runtime mapper currently applies only `PEAK` filters to engine biquad bands; shelf filters are parsed but skipped safely.
 - **Apply Matching**: `applyMatchedProfile()` uses conservative exact matching only (normalized name, then exact alias) to avoid accidental wrong-profile application. Typo-tolerant scoring is available in `suggestProfiles()` for typeahead only.
 - **Shelf Filters**: AutoEq `LOW_SHELF` and `HIGH_SHELF` filter types are parsed but not yet mapped to engine biquad bands; only `PEAK` filters are applied in Phase-1.
+- **Ramping Artifacts**: While pop-free transitions are now implemented via coefficient ramping, some edge-case rapid-switching scenarios or extreme profile changes may still produce minor transients on certain hardware.
 
 ---
 
@@ -189,10 +202,13 @@ The AutoEq flow is split into two stages:
 
 - `Engine.kt` is the public SDK surface used by `:app`.
 - Live feature extraction/classification runs in Kotlin (`AudioCaptureThread`).
-- Native (`audio_engine.cpp`) currently provides a JNI-compatible stub path only.
-- Kotlin runtime remains the default processing path unless native processing is explicitly enabled.
-- Policy switching is logical/config selection in Phase-1; full click-free DSP transitions are future work.
+- Native (`audio_engine.cpp` + `native_processing_engine.cpp`) now provides a real JNI-backed processing path with native DSP, analysis, and Oboe capture scaffolding.
+- Kotlin runtime remains the default-safe path unless native processing is explicitly enabled and validated on-device.
+- Policy switching now uses pop-free linear coefficient ramping (50ms configurable) to eliminate audible artifacts.
+- Auto-mode filter chain updates are now synchronized with classification changes for stable policy switching.
+- All DSP state-modifying methods in `PolicySelector` and `BiquadFilterChain` are synchronized; `captureThread` is volatile for thread-safe lifecycle management.
 - `applyMatchedProfile()` now applies mapped PEAK bands to the Kotlin runtime chain when available; JNI payload is still sent when native backend is present.
+- **Note**: Native mathematical correctness has been validated with the offline harness and desktop checks, but ARM64 on-device proof is still pending.
 
 ---
 
@@ -204,6 +220,7 @@ Use this checklist to verify the engine behavior from the host app (`:app`):
 - Toggle A/B mode and confirm active policy + mode indicator changes.
 - Change policies (Auto/Speech/Neutral) and confirm selector behavior is stable.
 - Try manual profile apply from the app UI and confirm `Last match` status updates correctly.
+- Run the **DSP Conformance Harness** (`conformance_tests.py`) to verify bit-perfect math.
 - Change output route (speaker/wired/bluetooth when available) and confirm safe fallback behavior.
 - Stop engine and export session logs from the app shell.
 - Confirm exported telemetry includes latency fields and route/policy metadata.

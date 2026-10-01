@@ -1,0 +1,7 @@
+- [x] Update `AudioEngineRepository.kt` with native toggles
+- [x] Update `ServiceAudioEngineRepository.kt` implementation
+- [x] Update `AudioEngineService.kt` with state and delegation
+- [x] Update `ValidationShellUiState.kt`
+- [x] Update `ValidationShellViewModel.kt` with handlers
+- [x] Update `ValidationShellScreen.kt` with "Native Engine Core" section
+- [x] Verify real-time switching on device

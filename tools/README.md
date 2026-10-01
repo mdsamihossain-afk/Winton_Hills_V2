@@ -12,6 +12,16 @@ Use the converter output as the real runtime dataset.
 
 Companion doc: `README_autoeq_converter.md`
 
+---
+
+## DSP Correctness Harness — tools/dsp_harness/
+
+Python-based validation suite for the native C++ engine. Compares implementation against a mathematical oracle.
+
+See [tools/dsp_harness/README.md](file:///C:/Users/scatt/Downloads/Winton_Hills_V2-master/Winton_Hills_V2-master/tools/dsp_harness/README.md) for build and usage instructions.
+
+---
+
 ## What's Changed (2026-03-14)
 
 - Converter-to-runtime handoff is explicitly linked to Kotlin DSP processed mode.

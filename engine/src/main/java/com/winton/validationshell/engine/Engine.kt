@@ -121,6 +121,16 @@ class Engine {
     }
 
     /**
+     * Enable or disable native audio capture via Oboe/AAudio.
+     * When enabled, the engine captures audio directly in C++.
+     */
+    fun setNativeCaptureEnabled(enabled: Boolean) {
+        if (nativeAvailable) {
+            nativeSetNativeCaptureEnabled(enabled)
+        }
+    }
+
+    /**
      * Resolve the current audio output route into a [HardwareProfile].
      * Call this before [startAudioEngine] to determine conservative mode, buffer sizes, etc.
      */
@@ -130,6 +140,12 @@ class Engine {
             manufacturer = Build.MANUFACTURER,
             model = Build.MODEL
         )
+        if (nativeAvailable) {
+            nativeUpdateHardwareConstraints(
+                currentHardwareProfile.forceConservative,
+                currentHardwareProfile.routeType == HardwareProfile.RouteType.BLUETOOTH
+            )
+        }
         Log.d(TAG, "Hardware resolved: $currentHardwareProfile")
         return currentHardwareProfile
     }
@@ -206,11 +222,25 @@ class Engine {
         }
 
         if (useNativePath()) {
-            return nativeStartEngine(
+            nativeUpdateHardwareConstraints(
+                conservativeMode,
+                currentHardwareProfile.routeType == HardwareProfile.RouteType.BLUETOOTH
+            )
+            nativeSetAutoPolicyEnabled(autoModeEnabled)
+
+            val started = nativeStartEngine(
                 conservativeMode,
                 currentHardwareProfile.suggestedSampleRate,
                 currentHardwareProfile.suggestedBufferFrames
             )
+            if (started) {
+                // If native capture is enabled, we don't need the Kotlin capture thread.
+                // We'll check this by querying the engine state or assuming the flag is set.
+                // For now, if native engine started successfully, we stay in native path.
+                return true
+            }
+            // If native failed to start, fall back to Kotlin (unless it's a fatal native error)
+            Log.w(TAG, "Native engine failed to start; falling back to Kotlin runtime")
         }
 
         // Start real microphone capture for analysis
@@ -392,6 +422,9 @@ class Engine {
     fun setAutoPolicy(enabled: Boolean) {
         Log.d(TAG, "setAutoPolicy($enabled)")
         autoModeEnabled = enabled
+        if (nativeAvailable) {
+            nativeSetAutoPolicyEnabled(enabled)
+        }
         if (!enabled) {
             policySelector.forcePolicy(activePolicyId)
         }
@@ -585,6 +618,9 @@ class Engine {
     private external fun nativePauseForRoutingChange()
     private external fun nativeGetAnalysisData(): FloatArray
     private external fun nativeSetPolicy(policyId: Int, bands: FloatArray)
+    private external fun nativeSetNativeCaptureEnabled(enabled: Boolean)
+    private external fun nativeSetAutoPolicyEnabled(enabled: Boolean)
+    private external fun nativeUpdateHardwareConstraints(forceConservative: Boolean, isBluetooth: Boolean)
     private external fun nativeGetLatencyMs(): Float
 
     // ========================================================================

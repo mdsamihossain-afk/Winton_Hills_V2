@@ -1,45 +1,23 @@
+# IDE / Editor
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
-
-# Android Studio
+.idea/
 *.iws
-*.ids
 *.ipr
-*.iml
-*.class
-
-# Android
-/local.properties
-/captures
 
 # Gradle
 .gradle/
-build/
+/build
+local.properties
 
-# NDK
+# Android Studio / Android
+/captures
+.externalNativeBuild
+.cxx
+
+# NDK / native
 obj/
 libs/
 jniLibs/
-
-# IntelliJ
-.idea/
-*.iws
-*.iml
-*.ipr
-out/
 
 # CMake
 CMakeCache.txt
@@ -62,3 +40,6 @@ Medium-Phone-API-36.1-Android-16_*
 tools/__pycache__/
 *.pyc
 
+# Native build outputs (engine)
+engine/src/main/cpp/build/
+engine/src/main/cpp/host_build/

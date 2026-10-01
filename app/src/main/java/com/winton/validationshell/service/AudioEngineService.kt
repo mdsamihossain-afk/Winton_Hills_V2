@@ -74,6 +74,12 @@ class AudioEngineService : Service() {
     private val _captureSource = MutableStateFlow(CaptureSource.MICROPHONE)
     val captureSource: StateFlow<CaptureSource> = _captureSource.asStateFlow()
 
+    private val _isNativeProcessingEnabled = MutableStateFlow(false)
+    val isNativeProcessingEnabled: StateFlow<Boolean> = _isNativeProcessingEnabled.asStateFlow()
+
+    private val _isNativeCaptureEnabled = MutableStateFlow(false)
+    val isNativeCaptureEnabled: StateFlow<Boolean> = _isNativeCaptureEnabled.asStateFlow()
+
     private val _activePolicy = MutableStateFlow(PolicyConfig.PASSTHROUGH)
 
     // --- Audio focus ---
@@ -323,6 +329,16 @@ class AudioEngineService : Service() {
     fun applyMatchedProfile(): Boolean = engine.applyMatchedProfile()
 
     fun suggestProfiles(query: String, limit: Int = 8): List<String> = engine.suggestProfiles(query, limit)
+
+    fun setNativeProcessingEnabled(enabled: Boolean) {
+        _isNativeProcessingEnabled.value = enabled
+        engine.setNativeProcessingEnabled(enabled)
+    }
+
+    fun setNativeCaptureEnabled(enabled: Boolean) {
+        _isNativeCaptureEnabled.value = enabled
+        engine.setNativeCaptureEnabled(enabled)
+    }
 
     fun setCaptureSource(source: CaptureSource) {
         engine.setCaptureSource(source)

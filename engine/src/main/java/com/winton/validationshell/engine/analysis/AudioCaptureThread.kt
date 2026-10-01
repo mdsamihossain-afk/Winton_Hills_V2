@@ -12,7 +12,6 @@ import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.Log
 import com.winton.validationshell.engine.CaptureSource
-import com.winton.validationshell.engine.Engine
 
 /**
  * Background thread that captures audio from the microphone via [AudioRecord],
@@ -31,7 +30,8 @@ class AudioCaptureThread(
     private val sampleRate: Int = 44100,
     private val frameSize: Int = 1024, // samples per analysis frame (must be power of 2)
     private val captureSource: CaptureSource = CaptureSource.MICROPHONE,
-    private val mediaProjection: MediaProjection? = null
+    private val mediaProjection: MediaProjection? = null,
+    private val onFrameCaptured: ((FloatArray, Int, Int, Long) -> Unit)? = null
 ) : Thread("AudioCaptureThread") {
 
     init {
@@ -362,6 +362,8 @@ class AudioCaptureThread(
                 for (i in samplesRead until frameSize) {
                     floatBuffer[i] = 0f
                 }
+
+                onFrameCaptured?.invoke(floatBuffer, samplesRead, activeSampleRate, captureStartNs)
 
                 // --- RMS ---
                 val rms = FeatureExtractor.computeRms(floatBuffer, samplesRead)

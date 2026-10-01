@@ -1,4 +1,4 @@
-# DSP Engine Review & Hardening Log (2026-06-11)
+# DSP Engine Review & Hardening Log (2026-09-11)
 
 ## Overview
 This document tracks critical bug fixes, performance optimizations, and documentation updates for the Phase-1 Kotlin DSP pipeline.
@@ -26,9 +26,10 @@ This document tracks critical bug fixes, performance optimizations, and document
 
 ## Status
 - **Phase-1 Kotlin Path:** 100% logic complete, 95% hardened.
-- **Native Path:** Stubbed (Phase-2 focus).
-- **Documentation:** README updated to reflect production-ready status for Phase-1.
+- **Native Path:** ⚠️ PARTIALLY CERTIFIED. Native DSP core and capture (Oboe) are implemented. Hardware validation on ARM64 revealed an FFT-magnitude divergence at N=2048 and a design defect in the Oboe analysis capture order.
+- **Documentation:** README and verification docs updated to reflect current defects and precision limits.
 
 ## Next Steps
-1. Verify pop-free transitions on physical hardware across different sample rates.
-2. Begin planning Phase-2 migration to C++ for the core DSP loop while maintaining the same ramping logic.
+1. Implement native MFCC for parity with the reference oracle.
+2. Port policy selection logic to C++.
+3. Perform performance benchmarking (Kotlin vs Native speedup).

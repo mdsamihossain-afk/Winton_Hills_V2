@@ -33,3 +33,18 @@ Profile application logs include:
 Compatibility note:
 - Existing `AutoEq*` telemetry keys are kept for backward compatibility with current logs.
 
+## Validation Telemetry
+
+The project uses an off-device **Harness** (`tools/dsp_harness`) to verify the engine's data integrity.
+
+### Hardware-in-the-loop (HIL) Validation
+The `native_test_runner` executable is the native-side validation entry point. It is intended for bit-perfect validation on actual hardware and reports:
+- **Max Error**: Absolute difference between native output and oracle reference.
+- **Coefficient Convergence**: Verified delta during linear ramping transitions.
+- **Feature Drift**: RMS and Centroid precision across different ABIs.
+
+Current status:
+- Desktop oracle validation exists and is reproducible.
+- Android emulator validation exists.
+- Physical ARM64 hardware validation still needs to be completed before the HIL path can be called fully verified.
+
